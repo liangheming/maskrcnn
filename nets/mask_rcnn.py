@@ -647,7 +647,7 @@ class ROIHead(nn.Module):
         for cls, box, wh in zip(cls_predicts, box_predicts, valid_size):
             box[..., [0, 2]] = box[..., [0, 2]].clamp(min=0, max=wh[0])
             box[..., [1, 3]] = box[..., [1, 3]].clamp(min=0, max=wh[1])
-            scores = cls[:, 1:]
+            scores = cls.softmax(dim=-1)[:, 1:]
             labels = torch.arange(scores.shape[-1], device=cls.device)
             labels = labels.view(1, -1).expand_as(scores)
             boxes = box.unsqueeze(1).repeat(1, scores.shape[-1], 1).reshape(-1, 4)
