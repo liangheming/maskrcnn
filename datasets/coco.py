@@ -157,6 +157,7 @@ class COCODataSets(Dataset):
 
     def __getitem__(self, index):
         data_info = self.data_info_list[index].clone().load_img().load_mask(self.coco.annToMask)
+        # data_info = RandScaleToMax(max_threshes=[640], pad_to_square=True)(data_info)
         data_info = self.transform(data_info)
         # assert data_info.img.dtype == np.uint8
         # import uuid
@@ -181,13 +182,21 @@ class COCODataSets(Dataset):
                 color_gitter,
                 RandCrop(min_thresh=0.6, max_thresh=1.0).reset(p=0.2),
                 RandScaleMinMax(min_threshes=self.min_threshes, max_thresh=self.max_thresh),
-                RandPerspective(degree=self.aug_cfg['degree'], scale=(1.0, 1.0), translate=0.1).reset(p=0.5)
+                RandPerspective(degree=self.aug_cfg['degree'], scale=(1.0, 1.0))
             ]
         )
 
+        mosaic = MosaicWrapper(candidate_box_info=self.data_info_list,
+                               sizes=[self.max_thresh],
+                               color_gitter=color_gitter,
+                               annToMask=self.coco.annToMask)
+
         augment_transform = Compose(
             transforms=[
-                basic_transform,
+                OneOf(transforms=[
+                    (0.5, basic_transform),
+                    (0.5, mosaic)
+                ]),
                 LRFlip().reset(p=0.5)
             ]
         )

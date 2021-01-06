@@ -212,14 +212,197 @@ class RandScaleMinMax(BasicTransform):
         if box_seg_info.boxes is not None and len(box_seg_info.boxes):
             box_seg_info.boxes = box_seg_info.boxes * ratio
         if box_seg_info.mask is not None and len(box_seg_info.mask):
-            box_seg_info.mask = np.stack([cv.resize(m,
-                                                    (img.shape[1],
-                                                     img.shape[0]),
-                                                    interpolation=cv.INTER_NEAREST) for m in box_seg_info.mask])
+            mask = cv.resize(box_seg_info.mask.transpose(1, 2, 0),
+                             (img.shape[1],
+                              img.shape[0]),
+                             interpolation=cv.INTER_NEAREST)
+            if len(mask.shape) < 3:
+                mask = mask[..., None]
+            box_seg_info.mask = mask.transpose(2, 0, 1)
             # box_seg_info.mask = cv.resize(box_seg_info.mask.transpose(1, 2, 0),
             #                               (img.shape[1], img.shape[0]),
-            #                               interpolation=cv.INTER_NEAREST).transpose(2, 0, 1)
+            #                               interpolation=cv.INTER_NEAREST)
         return box_seg_info
+
+
+class RandScaleToMax(BasicTransform):
+    def __init__(self, max_threshes,
+                 pad_to_square=True,
+                 minimum_rectangle=False,
+                 scale_up=True,
+                 division=64,
+                 **kwargs):
+        kwargs['p'] = 1.0
+        super(RandScaleToMax, self).__init__(**kwargs)
+        assert isinstance(max_threshes, list)
+        self.max_threshes = max_threshes
+        self.pad_to_square = pad_to_square
+        self.minimum_rectangle = minimum_rectangle
+        self.scale_up = scale_up
+        self.division = division
+
+    def make_border(self, img: np.ndarray, max_thresh, border_val):
+        h, w = img.shape[:2]
+        r = min(max_thresh / h, max_thresh / w)
+        if not self.scale_up:
+            r = min(r, 1.0)
+        new_w, new_h = int(round(w * r)), int(round(h * r))
+        if r != 1.0:
+            img = cv.resize(img, (new_w, new_h), interpolation=cv.INTER_LINEAR)
+        if not self.pad_to_square:
+            return img, r, (0, 0)
+        dw, dh = int(max_thresh - new_w), int(max_thresh - new_h)
+        if self.minimum_rectangle:
+            dw, dh = np.mod(dw, self.division), np.mod(dh, self.division)
+        dw /= 2
+        dh /= 2
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv.copyMakeBorder(img, top, bottom, left, right, cv.BORDER_CONSTANT, value=border_val)
+        return img, r, (left, top)
+
+    def aug(self, box_seg_info: BoxSegInfo) -> BoxSegInfo:
+        max_thresh = np.random.choice(self.max_threshes)
+        img, r, (left, top) = self.make_border(box_seg_info.img, max_thresh, box_seg_info.padding_val)
+        box_seg_info.img = img
+        if box_seg_info.boxes is not None and len(box_seg_info.boxes):
+            box_seg_info.boxes = box_seg_info.boxes * r
+            box_seg_info.boxes[:, [0, 2]] = box_seg_info.boxes[:, [0, 2]] + left
+            box_seg_info.boxes[:, [1, 3]] = box_seg_info.boxes[:, [1, 3]] + top
+        if box_seg_info.mask is not None and len(box_seg_info.mask):
+            mask = box_seg_info.mask
+
+            _, h, w = mask.shape
+            h_i, w_i, = img.shape[:2]
+            mask = cv.resize(mask.transpose(1, 2, 0),
+                             (int(round(w * r)), int(round(h * r))),
+                             interpolation=cv.INTER_NEAREST)
+            if len(mask.shape) < 3:
+                mask = mask[..., None]
+            if left == 0 and top == 0:
+                box_seg_info.mask = mask.transpose(2, 0, 1)
+            else:
+                h_m, w_m = mask.shape[:2]
+                right = w_i - left - w_m
+                bottom = h_i - top - h_m
+                mask = cv.copyMakeBorder(mask, top, bottom, left, right, cv.BORDER_CONSTANT, value=0)
+                if len(mask.shape) < 3:
+                    mask = mask[..., None]
+                box_seg_info.mask = mask.transpose(2, 0, 1)
+        return box_seg_info
+
+    def reset(self, **settings):
+        super(RandScaleToMax, self).reset(**settings)
+        max_threshes = settings.get('max_threshes', None)
+        if max_threshes is not None:
+            self.max_threshes = max_threshes
+        return self
+
+
+class Mosaic(BasicTransform):
+    def __init__(self,
+                 candidate_box_info,
+                 color_gitter=None,
+                 target_size=640,
+                 rand_center=True,
+                 translate=0.1,
+                 scale=(0.5, 1.5),
+                 degree=(0, 0),
+                 annToMask=None,
+                 **kwargs):
+        kwargs['p'] = 1.0
+        super(Mosaic, self).__init__(**kwargs)
+        assert isinstance(candidate_box_info, list)
+        self.candidate_box_info = candidate_box_info
+        if color_gitter is None:
+            color_gitter = Identity()
+        self.color_gitter = color_gitter
+        self.target_size = target_size
+        self.rand_center = rand_center
+        self.affine = RandPerspective(target_size=(target_size, target_size),
+                                      translate=translate,
+                                      scale=scale,
+                                      degree=degree)
+        self.scale_max = RandScaleToMax(max_threshes=[target_size], pad_to_square=False)
+        self.annToMask = annToMask
+
+    def aug(self, box_info: BoxSegInfo) -> BoxSegInfo:
+        mosaic_border = (-self.target_size // 2, -self.target_size // 2)
+        if self.rand_center:
+            yc, xc = [int(random.uniform(-x, 2 * self.target_size + x)) for x in mosaic_border]
+        else:
+            yc, xc = [self.target_size, self.target_size]
+        indices = [random.randint(0, len(self.candidate_box_info) - 1) for _ in range(3)]
+        img4 = np.tile(np.array(box_info.padding_val, dtype=np.uint8)[None, None, :],
+                       (self.target_size * 2, self.target_size * 2, 1))
+        # img4 = np.ones(shape=(self.target_size * 2, self.target_size * 2, 3)) * box_info.PADDING_VAL
+        box_info4 = list()
+        for i, index in enumerate([1] + indices):
+            if i == 0:
+                box_info_i = box_info
+            else:
+                box_info_i = self.candidate_box_info[index].clone().load_img().load_mask(self.annToMask)
+            box_info_i = self.color_gitter(box_info_i)
+            box_info_i = self.scale_max(box_info_i)
+            mask_i = box_info_i.mask
+
+            mask_large = np.zeros(shape=(len(mask_i), self.target_size * 2, self.target_size * 2))
+            h, w = box_info_i.img.shape[:2]
+            if i == 0:
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+            elif i == 1:  # top right
+                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, self.target_size * 2), yc
+                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+            elif i == 2:  # bottom left
+                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(self.target_size * 2, yc + h)
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, max(xc, w), min(y2a - y1a, h)
+            else:  # bottom right
+                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, self.target_size * 2), min(self.target_size * 2, yc + h)
+                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+            img4[y1a:y2a, x1a:x2a] = box_info_i.img[y1b:y2b, x1b:x2b]
+            padw = x1a - x1b
+            padh = y1a - y1b
+            if box_info_i.boxes is not None and len(box_info_i.boxes):
+                box_info_i.boxes[:, [0, 2]] = box_info_i.boxes[:, [0, 2]] + padw
+                box_info_i.boxes[:, [1, 3]] = box_info_i.boxes[:, [1, 3]] + padh
+                mask_large[:, y1a:y2a, x1a:x2a] = mask_i[:, y1b:y2b, x1b:x2b]
+                box_info_i.mask = mask_large
+                box_info4.append(box_info_i)
+        box_info.img = img4
+        if len(box_info4):
+            box_4 = np.concatenate([item.boxes for item in box_info4], axis=0)
+            np.clip(box_4, 0, 2 * self.target_size, out=box_4)
+            label_4 = [item.labels for item in box_info4 if item.labels is not None]
+            label_4 = np.concatenate(label_4, axis=0) if len(label_4) > 0 else None
+            mask_4 = [item.mask for item in box_info4]
+            mask_4 = np.concatenate(mask_4, axis=0)
+            box_info.boxes = box_4
+            box_info.labels = label_4
+            box_info.mask = mask_4
+        else:
+            return self.affine(box_info)
+        valid_index = np.bitwise_and((box_info.boxes[:, 2] - box_info.boxes[:, 0]) > 2,
+                                     (box_info.boxes[:, 3] - box_info.boxes[:, 1]) > 2)
+        box_info.boxes = box_info.boxes[valid_index, :]
+        if box_info.labels is not None and len(box_info.labels) > 0:
+            box_info.labels = box_info.labels[valid_index]
+        if box_info.mask is not None and len(box_info.mask) > 0:
+            box_info.mask = box_info.mask[valid_index]
+        return self.affine(box_info)
+
+
+class MosaicWrapper(Mosaic):
+    def __init__(self, sizes, **kwargs):
+        super(MosaicWrapper, self).__init__(**kwargs)
+        self.sizes = sizes
+
+    def aug(self, box_seg_info: BoxSegInfo) -> BoxSegInfo:
+        rand_size = np.random.choice(self.sizes)
+        self.target_size = rand_size
+        self.affine.reset(target_size=(rand_size, rand_size))
+        self.scale_max.reset(max_threshes=[rand_size])
+        return super(MosaicWrapper, self).aug(box_seg_info)
 
 
 class LRFlip(BasicTransform):
@@ -389,19 +572,23 @@ class RandPerspective(BasicTransform):
                     box_seg_info.mask = np.zeros((0, height, width))
                 else:
                     if self.perspective:
-                        box_seg_info.mask = np.stack([cv.warpPerspective(m,
-                                                                         transform_matrix,
-                                                                         dsize=(width, height),
-                                                                         borderValue=0,
-                                                                         flags=cv.INTER_NEAREST)
-                                                      for m in box_seg_info.mask])
+                        mask = cv.warpPerspective(box_seg_info.mask.transpose(1, 2, 0),
+                                                  transform_matrix,
+                                                  dsize=(width, height),
+                                                  borderValue=0,
+                                                  flags=cv.INTER_NEAREST)
+                        if len(mask.shape) < 3:
+                            mask = mask[..., None]
+                        box_seg_info.mask = mask.transpose(2, 0, 1)
                     else:
-                        box_seg_info.mask = np.stack([cv.warpAffine(m,
-                                                                    transform_matrix[:2],
-                                                                    dsize=(width, height),
-                                                                    borderValue=0,
-                                                                    flags=cv.INTER_NEAREST)
-                                                      for m in box_seg_info.mask])
+                        mask = cv.warpAffine(box_seg_info.mask.transpose(1, 2, 0),
+                                             transform_matrix[:2],
+                                             dsize=(width, height),
+                                             borderValue=0,
+                                             flags=cv.INTER_NEAREST)
+                        if len(mask.shape) < 3:
+                            mask = mask[..., None]
+                        box_seg_info.mask = mask.transpose(2, 0, 1)
 
             return box_seg_info
 
