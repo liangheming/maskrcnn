@@ -774,3 +774,22 @@ class MaskRCNN(nn.Module):
             return losses
         else:
             return predicts
+
+    @staticmethod
+    def project_to_image(predicts, valid_size):
+        ret = list()
+        for (box, mask), (w, h, r) in zip(predicts, valid_size):
+            if len(box) == 0:
+                ret.append((torch.zeros((0, 6)), torch.zeros((0, h, w))))
+            box[:, [0, 2]] = (box[:, [0, 2]] / r).clamp(min=0, max=w)
+            box[:, [1, 3]] = (box[:, [1, 3]] / r).clamp(min=0, max=h)
+            ret_mask = torch.zeros(size=(len(box), h, w), device=box.device)
+            for i, b, m in zip(range(len(box)), box, mask):
+                x1, y1, x2, y2 = b[:4].int()
+                b_w = x2 - x1
+                b_h = y2 - y1
+                m_r = F.interpolate(m[None, None, :, :], size=(int(b_h), int(b_w)), mode="bilinear",
+                                    align_corners=False).squeeze(0).squeeze(0)
+                ret_mask[i, y1:y2, x1:x2] = m_r
+            ret.append((box, ret_mask))
+        return ret

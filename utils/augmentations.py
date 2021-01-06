@@ -7,7 +7,7 @@ from copy import deepcopy
 
 class BoxSegInfo(object):
     def __init__(self,
-                 img_path,
+                 img_path=None,
                  img=None,
                  shape=None,
                  boxes=None,
@@ -60,7 +60,7 @@ class BoxSegInfo(object):
             for label_idx, m in zip(self.labels, self.mask):
                 color_mask = (np.tile(m[:, :, None], (1, 1, 3)) * np.array(colors[int(label_idx)])).astype(np.float)
                 mask_all += color_mask
-            ret_img = (ret_img.astype(np.float) * 0.6 + mask_all.astype(np.float) * 0.4).astype(np.uint8)
+            ret_img = (ret_img.astype(np.float) * 0.4 + mask_all.astype(np.float) * 0.6).astype(np.uint8)
 
         if boxes and self.boxes is not None and len(self.boxes) != 0:
             for label_idx, (x1, y1, x2, y2) in zip(self.labels, self.boxes):
