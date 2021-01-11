@@ -9,7 +9,7 @@ data:
   max_thresh: 768
   use_crowd: False
   batch_size: 4
-  num_workers: 4
+  num_workers: 2
   debug: False
   remove_blank: Ture
 
